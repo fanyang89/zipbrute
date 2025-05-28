@@ -4,10 +4,12 @@ go 1.24.3
 
 require (
 	github.com/schollz/progressbar/v3 v3.18.0
+	github.com/syndtr/goleveldb v1.0.0
 	github.com/yeka/zip v0.0.0-20231116150916-03d6312748a9
 )
 
 require (
+	github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db // indirect
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	golang.org/x/crypto v0.38.0 // indirect

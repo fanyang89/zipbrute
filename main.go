@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 
 	"github.com/schollz/progressbar/v3"
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/opt"
 	"github.com/yeka/zip"
 )
 
@@ -91,7 +94,31 @@ func verifyDecrypt(password string) (ok bool, err error) {
 	return
 }
 
-func tryDecryptWorker(ctx context.Context, passwordC <-chan string, bar *progressbar.ProgressBar) {
+func isPasswordFailed(password string, db *leveldb.DB) bool {
+	var err error
+	_, err = db.Get([]byte(password), nil)
+	if err != nil {
+		if errors.Is(err, leveldb.ErrNotFound) {
+			return false
+		} else {
+			panic(err)
+		}
+	}
+	return true
+}
+
+var nop = make([]byte, 0)
+
+var syncWrite = &opt.WriteOptions{Sync: true}
+
+func setPasswordFailed(password string, db *leveldb.DB) {
+	err := db.Put([]byte(password), nop, syncWrite)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func tryDecryptWorker(ctx context.Context, passwordC <-chan string, bar *progressbar.ProgressBar, db *leveldb.DB) {
 	r, err := zip.OpenReader(input)
 	if err != nil {
 		panic(err)
@@ -112,7 +139,8 @@ func tryDecryptWorker(ctx context.Context, passwordC <-chan string, bar *progres
 
 		case password := <-passwordC:
 			_ = bar.Add(1)
-			if startsWithDigit(password) {
+
+			if startsWithDigit(password) || isPasswordFailed(password, db) {
 				continue
 			}
 
@@ -123,12 +151,14 @@ func tryDecryptWorker(ctx context.Context, passwordC <-chan string, bar *progres
 			var reader io.ReadCloser
 			reader, err = f.Open()
 			if err != nil {
+				setPasswordFailed(password, db)
 				continue
 			}
 
 			_, err = io.ReadAll(reader)
 			_ = reader.Close()
 			if err != nil {
+				setPasswordFailed(password, db)
 				continue
 			}
 
@@ -136,6 +166,8 @@ func tryDecryptWorker(ctx context.Context, passwordC <-chan string, bar *progres
 			ok, err = verifyDecrypt(password)
 			if ok {
 				fmt.Printf("Password: %s\n", password)
+			} else {
+				setPasswordFailed(password, db)
 			}
 		}
 	}
@@ -144,6 +176,7 @@ func tryDecryptWorker(ctx context.Context, passwordC <-chan string, bar *progres
 var length int
 var input string
 var worker int
+var dbPath string
 
 func intPow(n, m int64) int64 {
 	if m == 0 {
@@ -163,6 +196,7 @@ func main() {
 	flag.IntVar(&length, "length", 1, "length of each element")
 	flag.StringVar(&input, "input", "", "input filename")
 	flag.IntVar(&worker, "worker", 8, "worker num")
+	flag.StringVar(&dbPath, "db", "./zipbrute-data", "database path")
 	flag.Parse()
 
 	if len(input) == 0 {
@@ -170,13 +204,30 @@ func main() {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	db, err := leveldb.OpenFile(dbPath, nil)
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = db.Close() }()
 
+	cnt := 0
+	iter := db.NewIterator(nil, nil)
+	for iter.Next() {
+		cnt++
+	}
+	iter.Release()
+	err = iter.Error()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Have %d elements\n", cnt)
+
+	ctx, cancel := context.WithCancel(context.Background())
 	bar := progressbar.Default(intPow(int64(len(charTable)), int64(length)))
 	passwordC := make(chan string, 10000)
 
 	for i := 0; i < worker; i++ {
-		go tryDecryptWorker(ctx, passwordC, bar)
+		go tryDecryptWorker(ctx, passwordC, bar, db)
 	}
 
 	for p := range iterAll(length) {
